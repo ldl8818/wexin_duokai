@@ -134,6 +134,15 @@ patch_app "WeChat 2" 2
 patch_app "WeChat 3" 3
 ```
 
+在重签名前，从本项目目录禁止两个分身自动下载和安装更新：
+
+```bash
+bash configure_clone_updates.sh "/Applications/WeChat 2.app"
+bash configure_clone_updates.sh "/Applications/WeChat 3.app"
+```
+
+分身使用脚本同步主微信版本，不自动下载安装更新。微信仍可能在启动后检查版本或提示更新，不要在分身内手动安装更新。此步骤同时更新分身的应用默认值和用户偏好，不改变主微信，也不触碰聊天记录。完成后继续执行下一节重签名，不能直接启动尚未重签的分身。
+
 ### Phase 6 — adhoc 重签 + 注册到系统
 
 ```bash

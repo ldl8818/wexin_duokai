@@ -13,6 +13,7 @@ set -euo pipefail
 
 # ---------- 配置 ----------
 N_CLONES=2                       # 分身个数。本机当前 2 个（WeChat 2 + WeChat 3）
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ---------- 常量 ----------
 TS="$(date +%Y-%m-%d_%H%M%S)"
@@ -39,6 +40,7 @@ bold "════════════════════════�
 echo
 
 [ -d "$MAIN_APP" ] || die "找不到主微信 $MAIN_APP"
+[ -f "$SCRIPT_DIR/configure_clone_updates.sh" ] || die "缺少分身更新策略脚本"
 
 MAIN_VER=$($PB -c "Print :CFBundleShortVersionString" "$MAIN_APP/Contents/Info.plist")
 echo "主微信版本: $MAIN_VER"
@@ -125,6 +127,8 @@ for n in $(seq 2 $((N_CLONES+1))); do
   $PB -c "Set :CFBundleDisplayName WeChat $n" "$info" 2>/dev/null \
     || $PB -c "Add :CFBundleDisplayName string WeChat $n" "$info"
 
+  bash "$SCRIPT_DIR/configure_clone_updates.sh" "$app"
+
   # 三种本地化都改（中文系统会优先用 zh-Hans 的字符串）
   for lproj in zh-Hans zh-Hant; do
     f="$app/Contents/Resources/$lproj.lproj/InfoPlist.strings"
@@ -146,7 +150,8 @@ phase 5 "重签名 + 注册到系统"
 for n in $(seq 2 $((N_CLONES+1))); do
   app="/Applications/WeChat $n.app"
   xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
-  codesign --force --deep --sign - "$app" 2>&1 | grep -v "^$" || true
+  codesign --force --deep --sign - "$app"
+  codesign --verify --deep --strict "$app"
   "$LS" -f "$app"
   echo "  ✅ WeChat $n.app 已重签并注册"
 done
