@@ -11,6 +11,13 @@
 
 set -euo pipefail
 
+CREATE_ONLY=0
+case "${1:-}" in
+  --create-only) CREATE_ONLY=1 ;;
+  '') ;;
+  *) echo '用法：bash 升级分身.command [--create-only]' >&2; exit 2 ;;
+esac
+
 # ---------- 配置 ----------
 N_CLONES=2                       # 分身个数。本机当前 2 个（WeChat 2 + WeChat 3）
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -33,7 +40,7 @@ phase()  { printf '\n\033[1;36m▶ [%s/8] %s\033[0m\n' "$1" "$2"; }
 die() { red "❌ $*"; echo "脚本已停止。按任意键退出…"; read -n1; exit 1; }
 
 # ---------- 起手检查 ----------
-clear
+if [ -t 1 ]; then clear; fi
 bold "════════════════════════════════════════════"
 bold "  Mac 微信多开 · 一键升级分身"
 bold "════════════════════════════════════════════"
@@ -44,8 +51,9 @@ echo
 
 MAIN_VER=$($PB -c "Print :CFBundleShortVersionString" "$MAIN_APP/Contents/Info.plist")
 echo "主微信版本: $MAIN_VER"
-echo "分身个数:   $N_CLONES（WeChat 2 ~ WeChat $((N_CLONES+1))）"
+echo "分身个数:   ${N_CLONES}（WeChat 2 ~ WeChat $((N_CLONES+1))）"
 echo
+if [ "$CREATE_ONLY" -eq 0 ]; then
 echo "本工具会："
 echo "  1) 关闭所有微信进程（请先确保没在传重要文件）"
 echo "  2) 删除旧分身 App（沙盒容器/聊天记录不删 —— 这是聊天记录的保护铁律）"
@@ -55,10 +63,20 @@ echo "  5) 修复启动台显示"
 echo
 yellow "ℹ️ 聊天记录在 ~/Library/Containers/${MAIN_ID}.clone*/，本流程全程不动该目录，"
 yellow "  因此默认不备份（4G 时间空间成本不值）。仅备份启动台数据库（7MB）。"
+fi
 echo
+if [ "$CREATE_ONLY" -eq 1 ]; then
+  for n in $(seq 2 $((N_CLONES+1))); do
+    [ ! -e "/Applications/WeChat $n.app" ] || { echo "分身已存在，拒绝覆盖：WeChat $n.app" >&2; exit 1; }
+  done
+  echo '仅创建模式：不关闭微信、不删除应用、不改启动台。'
+  yn=y
+else
 read -p "确认开始？输 y 继续，其他键退出: " yn
+fi
 [[ "$yn" =~ ^[Yy]$ ]] || { echo "已取消。"; exit 0; }
 
+if [ "$CREATE_ONLY" -eq 0 ]; then
 # ---------- Phase 1: 关闭微信进程 ----------
 phase 1 "关闭所有微信进程"
 pkill -TERM -f "WeChatAppEx"                 2>/dev/null || true
@@ -109,6 +127,7 @@ for legacy in "/Applications/WeChat 2 Core.app" "/Applications/WeChat 3 Core.app
 done
 
 # ---------- Phase 3: 克隆新版分身 ----------
+fi
 phase 3 "从主版本克隆 $N_CLONES 个新分身"
 for n in $(seq 2 $((N_CLONES+1))); do
   echo "  克隆 → WeChat $n.app …"
@@ -116,52 +135,24 @@ for n in $(seq 2 $((N_CLONES+1))); do
 done
 green "  ✅ 克隆完成"
 
-# ---------- Phase 4: 改 Bundle ID + 本地化字符串 ----------
-phase 4 "修改 Bundle ID 和显示名"
+# ---------- Phase 4/5: 共享配置与签名 ----------
+phase 4 "配置分身身份、本地化名称和更新策略"
 for n in $(seq 2 $((N_CLONES+1))); do
   app="/Applications/WeChat $n.app"
-  info="$app/Contents/Info.plist"
-
-  $PB -c "Set :CFBundleIdentifier ${MAIN_ID}.clone$n" "$info"
-  $PB -c "Set :CFBundleName WeChat $n" "$info"
-  $PB -c "Set :CFBundleDisplayName WeChat $n" "$info" 2>/dev/null \
-    || $PB -c "Add :CFBundleDisplayName string WeChat $n" "$info"
-
-  bash "$SCRIPT_DIR/configure_clone_updates.sh" "$app"
-
-  # 三种本地化都改（中文系统会优先用 zh-Hans 的字符串）
-  for lproj in zh-Hans zh-Hant; do
-    f="$app/Contents/Resources/$lproj.lproj/InfoPlist.strings"
-    if [ -f "$f" ]; then
-      $PB -c "Set :CFBundleDisplayName 微信 $n" "$f"
-      $PB -c "Set :CFBundleName 微信 $n" "$f"
-    fi
-  done
-  f="$app/Contents/Resources/en.lproj/InfoPlist.strings"
-  if [ -f "$f" ]; then
-    $PB -c "Set :CFBundleDisplayName WeChat $n" "$f"
-    $PB -c "Set :CFBundleName WeChat $n" "$f"
-  fi
-  echo "  ✅ WeChat $n.app → ${MAIN_ID}.clone$n / 中文名「微信 $n」"
-done
-
-# ---------- Phase 5: 重签 + 注册到 LaunchServices ----------
-phase 5 "重签名 + 注册到系统"
-for n in $(seq 2 $((N_CLONES+1))); do
-  app="/Applications/WeChat $n.app"
-  xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
-  codesign --force --deep --sign - "$app"
-  codesign --verify --deep --strict "$app"
+  python3 -B "$SCRIPT_DIR/prepare_clone.py" "$MAIN_APP" "$app" "$n"
   "$LS" -f "$app"
-  echo "  ✅ WeChat $n.app 已重签并注册"
+  echo "  ✅ WeChat $n.app 配置与签名验证通过"
 done
 
-# 清理废纸篓里旧 App 在 LaunchServices 的残留注册
+# 仅升级模式清理旧注册；首次创建不扫描无关旧应用。
+if [ "$CREATE_ONLY" -eq 0 ]; then
 echo "  清理废纸篓里旧 App 的 LaunchServices 残留 …"
 find "$HOME/.Trash" -maxdepth 1 -name "WeChat*.app" -print0 2>/dev/null \
   | xargs -0 -I {} "$LS" -u "{}" 2>/dev/null || true
+fi
 
 # ---------- Phase 6: 修复启动台显示 ----------
+if [ "$CREATE_ONLY" -eq 0 ]; then
 phase 6 "修复启动台显示（如有需要）"
 LP_DB="$(getconf DARWIN_USER_DIR)com.apple.dock.launchpad/db/db"
 if [ -f "$LP_DB" ]; then
@@ -172,7 +163,7 @@ if [ -f "$LP_DB" ]; then
     bid="${MAIN_ID}.clone$n"
     rowid=$(sqlite3 "$LP_DB" "SELECT item_id FROM apps WHERE bundleid='$bid';" || true)
     if [ -z "$rowid" ]; then
-      echo "  ⚠️ Launchpad 数据库尚无 $bid，下次重启 Dock 后会自动出现"
+      echo "  ⚠️ Launchpad 数据库尚无 ${bid}，下次重启 Dock 后会自动出现"
       continue
     fi
 
@@ -219,6 +210,7 @@ phase 7 "刷新 Dock 和 Finder"
 killall Dock   2>/dev/null || true
 killall Finder 2>/dev/null || true
 green "  ✅ Dock 已重启（启动台布局不变）"
+fi
 
 # ---------- Phase 8: 验证 ----------
 phase 8 "终态验证"
@@ -233,23 +225,25 @@ for n in 0 $(seq 2 $((N_CLONES+1))); do
   if [ -d "$app" ]; then
     id=$($PB -c "Print :CFBundleIdentifier" "$app/Contents/Info.plist" 2>/dev/null)
     ver=$($PB -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist" 2>/dev/null)
-    csz=$(du -sh "$HOME/Library/Containers/$id" 2>/dev/null | cut -f1)
+    csz=$(du -sh "$HOME/Library/Containers/$id" 2>/dev/null | cut -f1 || true)
     printf "  · %-12s v%-6s · %s · 容器 %s\n" "$label" "$ver" "$id" "${csz:-?}"
   fi
 done
 
 echo
 green "════════════════════════════════════════════"
-green "  全部完成！"
+green "  应用创建和签名检查完成，仍须验证真实启动！"
 green "════════════════════════════════════════════"
 echo
 echo "📋 请你做："
 echo "  1) 按 F4 或四指捏合打开启动台，检查能看到微信 / 微信 2 / 微信 3"
 echo "  2) 启动每个分身确认聊天记录都在"
 echo
-echo "🗂  启动台 DB 备份: $LP_BAK（确认无问题后可 trash）"
+if [ "$CREATE_ONLY" -eq 0 ]; then
+echo "🗂  启动台 DB 备份: ${LP_BAK}（确认无问题后可 trash）"
+fi
 echo
 echo "如果启动台还看不到分身，参考 Mac多开微信.md 的"故障排查"章节。"
 echo
 echo "按任意键退出…"
-read -n1
+if [ -t 0 ]; then read -n1; fi
